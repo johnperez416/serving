@@ -44,6 +44,20 @@ Status LoadSessionBundleOrSavedModelBundle(
     const string& export_dir, const std::unordered_set<string>& tags,
     SavedModelBundle* bundle, bool* is_session_bundle = nullptr);
 
+// Loads a SavedModel from either a session-bundle path or a SavedModel bundle
+// path. If `is_session_bundle` is not a nullptr, sets it to `true` iff
+// SavedModel was up-converted and loaded from a SessionBundle.
+// `is_session_bundle` value should not be used if error is returned. If
+// `maybe_load_saved_model_config` is set and
+// {export_dir}/assets.extra/saved_model_config.pb exists, the configs defined
+// in saved_model_config.pb will override associated values specified in
+// `session_options`.
+Status LoadSessionBundleOrSavedModelBundle(
+    const SessionOptions& session_options, const RunOptions& run_options,
+    const string& export_dir, const std::unordered_set<string>& tags,
+    bool maybe_load_saved_model_config, SavedModelBundle* bundle,
+    bool* is_session_bundle = nullptr);
+
 // Interface from session_bundle.h
 
 // Similar to the LoadSessionBundleFromPath(), but also allows the session run
@@ -99,13 +113,6 @@ Status RunRegression(const RegressionSignature& signature, const Tensor& input,
 Status GetNamedSignature(const string& name,
                          const tensorflow::MetaGraphDef& meta_graph_def,
                          Signature* default_signature);
-
-// EXPERIMENTAL. THIS METHOD MAY CHANGE OR GO AWAY. USE WITH CAUTION.
-// Sets a global graph rewrite function that is called on all saved models
-// immediately after metagraph load, but before session creation.  This function
-// can only be called once.
-Status SetGraphRewriter(
-    std::function<Status(tensorflow::MetaGraphDef*)>&& rewriter);
 
 }  // namespace session_bundle
 }  // namespace serving

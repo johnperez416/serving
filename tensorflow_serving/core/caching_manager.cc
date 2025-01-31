@@ -15,7 +15,10 @@ limitations under the License.
 
 #include "tensorflow_serving/core/caching_manager.h"
 
+#include <map>
+#include <memory>
 #include <utility>
+#include <vector>
 
 #include "absl/types/optional.h"
 #include "tensorflow/core/lib/core/errors.h"
@@ -152,7 +155,7 @@ Status CachingManager::LoadServable(
       if (!manage_status.ok()) {
         const string error_msg = strings::StrCat(
             "Internal error: unable to transfer servable to 'basic_manager_': ",
-            manage_status.error_message());
+            manage_status.message());
         DCHECK(false) << error_msg;
         return errors::Internal(error_msg);
       }

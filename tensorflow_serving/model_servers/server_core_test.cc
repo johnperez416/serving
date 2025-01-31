@@ -15,23 +15,35 @@ limitations under the License.
 
 #include "tensorflow_serving/model_servers/server_core.h"
 
+#include <map>
+#include <memory>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 #include "google/protobuf/any.pb.h"
+#include "absl/status/status.h"
 #include "absl/strings/strip.h"
 #include "tensorflow/cc/saved_model/tag_constants.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/lib/random/random.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/path.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/protobuf/error_codes.pb.h"
 #include "tensorflow_serving/apis/model.pb.h"
 #include "tensorflow_serving/apis/predict.pb.h"
+#include "tensorflow_serving/core/request_logger.h"
 #include "tensorflow_serving/core/servable_handle.h"
+#include "tensorflow_serving/core/servable_id.h"
 #include "tensorflow_serving/core/servable_state.h"
 #include "tensorflow_serving/core/test_util/availability_test_util.h"
 #include "tensorflow_serving/core/test_util/fake_loader_source_adapter.pb.h"
 #include "tensorflow_serving/core/test_util/fake_log_collector.h"
+#include "tensorflow_serving/core/test_util/mock_prediction_stream_logger.h"
 #include "tensorflow_serving/core/test_util/mock_request_logger.h"
 #include "tensorflow_serving/model_servers/model_platform_types.h"
 #include "tensorflow_serving/model_servers/test_util/server_core_test_util.h"
@@ -44,11 +56,14 @@ namespace tensorflow {
 namespace serving {
 namespace {
 
+using test_util::MockPredictionStreamLogger;
 using test_util::ServerCoreTest;
 using ::testing::_;
 using ::testing::Invoke;
 using ::testing::MockFunction;
 using ::testing::NiceMock;
+using ::testing::Pair;
+using ::testing::UnorderedElementsAre;
 
 TEST_P(ServerCoreTest, PreLoadHook) {
   std::unique_ptr<ServerCore> server_core;
@@ -82,6 +97,19 @@ TEST_P(ServerCoreTest, CreateWaitsTillModelsAvailable) {
   TF_ASSERT_OK(
       server_core->GetServableHandle<string>(model_spec, &servable_handle));
   EXPECT_EQ(servable_handle.id(), expected_id);
+
+  // Validate monitoring states.
+  const auto servable_map =
+      server_core->servable_state_monitor()->GetAllServableStates();
+  auto it_servable = servable_map.find(test_util::kTestModelName);
+  ASSERT_NE(it_servable, servable_map.end());
+  ASSERT_THAT(it_servable->second,
+              UnorderedElementsAre(Pair(test_util::kTestModelVersion, _)));
+  const auto state_and_time =
+      it_servable->second.at(test_util::kTestModelVersion);
+  EXPECT_TRUE(state_and_time.state.health.ok());
+  EXPECT_EQ(state_and_time.state.manager_state,
+            ServableState::ManagerState::kAvailable);
 }
 
 TEST_P(ServerCoreTest, ReloadConfigWaitsTillModelsAvailable) {
@@ -118,6 +146,17 @@ TEST_P(ServerCoreTest, ReloadConfigUnloadsModels) {
   test_util::WaitUntilServableManagerStateIsOneOf(
       *server_core->servable_state_monitor(), servable_id,
       {ServableState::ManagerState::kEnd});
+  // Validate monitoring states.
+  const auto servable_map =
+      server_core->servable_state_monitor()->GetAllServableStates();
+  auto it_servable = servable_map.find(test_util::kTestModelName);
+  ASSERT_NE(it_servable, servable_map.end());
+  ASSERT_THAT(it_servable->second,
+              UnorderedElementsAre(Pair(test_util::kTestModelVersion, _)));
+  const auto state_and_time =
+      it_servable->second.at(test_util::kTestModelVersion);
+  ASSERT_EQ(state_and_time.state.manager_state,
+            ServableState::ManagerState::kEnd);
 }
 
 TEST_P(ServerCoreTest, ReloadConfigHandlesLoadingAPreviouslyUnloadedModel) {
@@ -299,6 +338,21 @@ TEST_P(ServerCoreTest, ErroringModel) {
   EXPECT_FALSE(status.ok());
   EXPECT_THAT(status.ToString(),
               ::testing::HasSubstr("1 servable(s) did not become available"));
+
+  // Validate monitoring states.
+  const auto servable_map =
+      server_core->servable_state_monitor()->GetAllServableStates();
+  auto it_servable = servable_map.find(test_util::kTestModelName);
+  ASSERT_NE(it_servable, servable_map.end());
+  ASSERT_THAT(it_servable->second,
+              UnorderedElementsAre(Pair(test_util::kTestModelVersion, _)));
+  const auto state_and_time =
+      it_servable->second.at(test_util::kTestModelVersion);
+  EXPECT_EQ(state_and_time.state.health.code(), absl::StatusCode::kCancelled);
+  EXPECT_THAT(state_and_time.state.health.ToString(),
+              ::testing::HasSubstr("injected error"));
+  EXPECT_EQ(state_and_time.state.manager_state,
+            ServableState::ManagerState::kEnd);
 }
 
 TEST_P(ServerCoreTest, IllegalReconfigurationToCustomConfig) {
@@ -583,6 +637,11 @@ TEST_P(ServerCoreTest, RequestLoggingOff) {
 
   TF_ASSERT_OK(
       server_core->Log(PredictRequest(), PredictResponse(), LogMetadata()));
+  auto logger =
+      server_core->StartLoggingStream<PredictRequest, PredictResponse>(
+          LogMetadata(),
+          []() { return std::make_unique<MockPredictionStreamLogger>(); });
+  EXPECT_EQ(logger, nullptr);
 }
 
 TEST_P(ServerCoreTest, RequestLoggingOn) {
@@ -590,12 +649,12 @@ TEST_P(ServerCoreTest, RequestLoggingOn) {
   ServerCore::Options options = GetDefaultOptions();
   TF_CHECK_OK(ServerRequestLogger::Create(
       [&](const LoggingConfig& logging_config,
-          std::unique_ptr<RequestLogger>* const request_logger) {
+          std::shared_ptr<RequestLogger>* const request_logger) {
         const string& filename_prefix =
             logging_config.log_collector_config().filename_prefix();
         log_collector_map[filename_prefix] = new FakeLogCollector();
         const std::vector<string>& tags = {kSavedModelTagServe};
-        auto mock_request_logger = std::unique_ptr<NiceMock<MockRequestLogger>>(
+        auto mock_request_logger = std::shared_ptr<NiceMock<MockRequestLogger>>(
             new NiceMock<MockRequestLogger>(
                 logging_config, tags, log_collector_map[filename_prefix]));
         ON_CALL(*mock_request_logger, CreateLogMessage(_, _, _, _))
@@ -605,10 +664,10 @@ TEST_P(ServerCoreTest, RequestLoggingOn) {
                                       std::unique_ptr<google::protobuf::Message>* log) {
               *log = std::unique_ptr<google::protobuf::Any>(
                   new google::protobuf::Any());
-              return OkStatus();
+              return absl::OkStatus();
             }));
         *request_logger = std::move(mock_request_logger);
-        return OkStatus();
+        return absl::OkStatus();
       },
       &options.server_request_logger));
 
@@ -631,6 +690,7 @@ TEST_P(ServerCoreTest, RequestLoggingOn) {
   std::unique_ptr<ServerCore> server_core;
   TF_ASSERT_OK(ServerCore::Create(std::move(options), &server_core));
 
+  // Logging for unary requests.
   LogMetadata log_metadata0;
   auto* const model_spec0 = log_metadata0.mutable_model_spec();
   model_spec0->set_name(test_util::kTestModelName);
@@ -638,6 +698,22 @@ TEST_P(ServerCoreTest, RequestLoggingOn) {
       server_core->Log(PredictRequest(), PredictResponse(), log_metadata0));
   ASSERT_EQ(1, log_collector_map.size());
   EXPECT_EQ(1, log_collector_map[test_util::kTestModelName]->collect_count());
+
+  // Logging for streaming requests.
+  auto* logger_ptr = new MockPredictionStreamLogger();
+  auto logger =
+      server_core->StartLoggingStream<PredictRequest, PredictResponse>(
+          log_metadata0,
+          [logger_ptr]() { return absl::WrapUnique(logger_ptr); });
+  EXPECT_CALL(*logger_ptr, CreateLogMessage(_, _))
+      .WillOnce(Invoke([](const LogMetadata& log_metadata,
+                          std::unique_ptr<google::protobuf::Message>* log) {
+        *log = std::make_unique<google::protobuf::Any>();
+        return absl::OkStatus();
+      }));
+  TF_ASSERT_OK(logger->LogMessage());
+  ASSERT_EQ(1, log_collector_map.size());
+  EXPECT_EQ(2, log_collector_map[test_util::kTestModelName]->collect_count());
 }
 
 TEST_P(ServerCoreTest, ModelSpecMultipleVersionsAvailable) {
@@ -903,7 +979,7 @@ INSTANTIATE_TEST_CASE_P(
         IsTensorflowServingOSS()
             ? ::testing::Range(
                   static_cast<int>(test_util::ServerCoreTest::SAVED_MODEL),
-                  static_cast<int>(test_util::ServerCoreTest::SAVED_MODEL))
+                  static_cast<int>(test_util::ServerCoreTest::NUM_TEST_TYPES))
             : ::testing::Range(
                   0, static_cast<int>(ServerCoreTest::NUM_TEST_TYPES)),
         ::testing::Bool()));
@@ -914,7 +990,7 @@ INSTANTIATE_TEST_CASE_P(
         IsTensorflowServingOSS()
             ? ::testing::Range(
                   static_cast<int>(test_util::ServerCoreTest::SAVED_MODEL),
-                  static_cast<int>(test_util::ServerCoreTest::SAVED_MODEL))
+                  static_cast<int>(test_util::ServerCoreTest::NUM_TEST_TYPES))
             : ::testing::Range(
                   0, static_cast<int>(ServerCoreTest::NUM_TEST_TYPES)),
         ::testing::Bool()));

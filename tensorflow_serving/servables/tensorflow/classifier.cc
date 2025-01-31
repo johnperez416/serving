@@ -21,6 +21,7 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "tensorflow/cc/saved_model/signature_constants.h"
@@ -126,7 +127,7 @@ Status CreateClassifierFromSavedModelBundle(
     const RunOptions& run_options, std::unique_ptr<SavedModelBundle> bundle,
     std::unique_ptr<ClassifierInterface>* service) {
   service->reset(new SavedModelClassifier(run_options, std::move(bundle)));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status CreateFlyweightTensorFlowClassifier(
@@ -144,7 +145,7 @@ Status CreateFlyweightTensorFlowClassifier(
     std::unique_ptr<ClassifierInterface>* service) {
   service->reset(new SavedModelTensorFlowClassifier(
       run_options, session, signature, thread_pool_options));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status GetClassificationSignatureDef(const ModelSpec& model_spec,
@@ -169,7 +170,7 @@ Status GetClassificationSignatureDef(const ModelSpec& model_spec,
         PreProcessClassification(iter->second, nullptr, nullptr));
   }
   *signature = iter->second;
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status PreProcessClassification(const SignatureDef& signature,
@@ -218,7 +219,7 @@ Status PreProcessClassification(const SignatureDef& signature,
       output_tensor_names->push_back(scores_iter->second.name());
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status PostProcessClassificationResult(
@@ -319,7 +320,7 @@ Status PostProcessClassificationResult(
       }
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status RunClassify(const RunOptions& run_options,

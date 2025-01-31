@@ -15,6 +15,11 @@ limitations under the License.
 
 #include "tensorflow_serving/servables/tensorflow/bundle_factory_util.h"
 
+#include <functional>
+#include <memory>
+#include <utility>
+#include <vector>
+
 #include "google/protobuf/wrappers.pb.h"
 #include "tensorflow/core/kernels/batching_util/batch_scheduler.h"
 #include "tensorflow/core/lib/core/errors.h"
@@ -77,7 +82,12 @@ Status GetPerModelBatchingParams(const string& path,
             << "using session config batching params: "
             << params->value().DebugString();
   }
-  return Status::OK();
+  return absl::OkStatus();
+}
+
+Status EstimateResourceFromValidationResult(const string& path,
+                                            ResourceAllocation* estimate) {
+  return EstimateMainRamBytesFromValidationResult(path, estimate);
 }
 
 Status EstimateResourceFromPath(const string& path, bool use_validation_result,
@@ -140,7 +150,7 @@ Status WrapSessionForBatching(const BatchingParameters& batching_config,
       std::unique_ptr<BatchScheduler<BatchingSessionTask>>* queue) {
     TF_RETURN_IF_ERROR(batch_scheduler->AddQueue(
         queue_options, process_batch_callback, queue));
-    return OkStatus();
+    return absl::OkStatus();
   };
   std::vector<SignatureWithBatchingSessionSchedulerCreator>
       signatures_with_scheduler_creators;
@@ -158,13 +168,13 @@ Status WrapSessionForBatching(const BatchingParameters& batching_config,
 
 Status WrapSession(std::unique_ptr<Session>* session) {
   session->reset(new ServingSessionWrapper(std::move(*session)));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status WrapSessionIgnoreThreadPoolOptions(std::unique_ptr<Session>* session) {
   session->reset(
       new SessionWrapperIgnoreThreadPoolOptions(std::move(*session)));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace serving

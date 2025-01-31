@@ -417,6 +417,7 @@ cc_library(
         ":servable_id",
         ":servable_state",
         "//tensorflow_serving/util:event_bus",
+        "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:optional",
         "@org_tensorflow//tensorflow/core:lib",
     ],
@@ -427,8 +428,12 @@ cc_test(
     size = "small",
     srcs = ["servable_state_monitor_test.cc"],
     deps = [
+        ":manager",
+        ":servable_id",
+        ":servable_state",
         ":servable_state_monitor",
         "//tensorflow_serving/core/test_util:test_main",
+        "//tensorflow_serving/util:event_bus",
         "@org_tensorflow//tensorflow/core:lib",
         "@org_tensorflow//tensorflow/core/kernels/batching_util:fake_clock_env",
     ],
@@ -442,6 +447,8 @@ cc_library(
         ":loader",
         ":servable_id",
         "//tensorflow_serving/util:retrier",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:optional",
         "@org_tensorflow//tensorflow/core:lib",
     ],
@@ -544,6 +551,7 @@ cc_test(
     size = "small",
     srcs = ["aspired_versions_manager_test.cc"],
     deps = [
+        ":aspired_version_policy",
         ":aspired_versions_manager",
         ":availability_preserving_policy",
         ":servable_state_monitor",
@@ -773,10 +781,13 @@ cc_library(
     ],
     deps = [
         ":log_collector",
+        ":stream_logger",
         "//tensorflow_serving/apis:logging_cc_proto",
+        "//tensorflow_serving/apis:model_cc_proto",
         "//tensorflow_serving/config:logging_config_cc_proto",
         "@com_google_protobuf//:protobuf",
         "@org_tensorflow//tensorflow/core:lib",
+        "@org_tensorflow//tensorflow/core:protos_all_cc",
     ],
 )
 
@@ -792,12 +803,14 @@ cc_test(
         "//tensorflow_serving/apis:predict_cc_proto",
         "//tensorflow_serving/config:logging_config_cc_proto",
         "//tensorflow_serving/core/test_util:mock_log_collector",
+        "//tensorflow_serving/core/test_util:mock_prediction_stream_logger",
         "//tensorflow_serving/core/test_util:mock_request_logger",
         "//tensorflow_serving/core/test_util:test_main",
         "//tensorflow_serving/test_util",
         "@com_google_protobuf//:protobuf",
         "@org_tensorflow//tensorflow/cc/saved_model:tag_constants",
         "@org_tensorflow//tensorflow/core:lib",
+        "@org_tensorflow//tensorflow/core:test",
     ],
 )
 
@@ -832,6 +845,7 @@ cc_test(
         "//tensorflow_serving/config:log_collector_config_cc_proto",
         "//tensorflow_serving/config:logging_config_cc_proto",
         "//tensorflow_serving/core/test_util:fake_log_collector",
+        "//tensorflow_serving/core/test_util:mock_prediction_stream_logger",
         "//tensorflow_serving/core/test_util:mock_request_logger",
         "//tensorflow_serving/core/test_util:test_main",
         "//tensorflow_serving/test_util",
@@ -841,5 +855,16 @@ cc_test(
         "@org_tensorflow//tensorflow/cc/saved_model:tag_constants",
         "@org_tensorflow//tensorflow/core:lib",
         "@org_tensorflow//tensorflow/core:test",
+    ],
+)
+
+cc_library(
+    name = "stream_logger",
+    hdrs = ["stream_logger.h"],
+    deps = [
+        "//tensorflow_serving/apis:logging_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_protobuf//:protobuf",
+        "@org_tensorflow//tensorflow/core:lib",
     ],
 )

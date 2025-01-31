@@ -19,12 +19,15 @@ limitations under the License.
 #include <iterator>
 #include <map>
 #include <memory>
+#include <set>
+#include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/strings/strcat.h"
+#include "tensorflow/core/platform/context.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow_serving/core/loader_harness.h"
@@ -50,6 +53,10 @@ struct Aspired {
 // Note that this returns a strict weak ordering.
 struct CompareActions {
  public:
+  explicit CompareActions(
+      AspiredVersionsManager::CustomSortActionsFn custom_sort_actions)
+      : custom_sort_actions_(custom_sort_actions) {}
+
   bool operator()(
       const absl::optional<AspiredVersionPolicy::ServableAction>& lhs,
       const absl::optional<AspiredVersionPolicy::ServableAction>& rhs) {
@@ -60,6 +67,9 @@ struct CompareActions {
       return true;
     }
     // By this point, we are sure the optionals have values.
+    if (custom_sort_actions_) {
+      return custom_sort_actions_(lhs.value(), rhs.value());
+    }
     return OrderActions(lhs.value(), rhs.value()).action != rhs.value().action;
   }
 
@@ -77,6 +87,7 @@ struct CompareActions {
         return lhs;
     }
   }
+  AspiredVersionsManager::CustomSortActionsFn custom_sort_actions_;
 };
 
 // Validates whether all entries in 'versions' pertain to the servable named
@@ -112,14 +123,14 @@ string ServableVersionsDebugString(
   for (const ServableData<std::unique_ptr<Loader>>& version : versions) {
     version_strings.push_back(version.id().DebugString());
   }
-  return str_util::Join(version_strings, ", ");
+  return absl::StrJoin(version_strings, ", ");
 }
 
 }  // namespace
 
 namespace internal {
 
-// AspiredVersionManager's implementation of the Target API.
+// AspiredVersionsManager's implementation of the Target API.
 class AspiredVersionsManagerTargetImpl final
     : public TargetBase<std::unique_ptr<Loader>> {
  public:
@@ -163,13 +174,19 @@ Status AspiredVersionsManager::Create(
   basic_manager_options.env = options.env;
   basic_manager_options.servable_event_bus = options.servable_event_bus;
   basic_manager_options.pre_load_hook = std::move(options.pre_load_hook);
+  if (options.should_retry_model_load) {
+    basic_manager_options.should_retry_model_load =
+        std::move(options.should_retry_model_load);
+  }
   std::unique_ptr<BasicManager> basic_manager;
   TF_RETURN_IF_ERROR(
       BasicManager::Create(std::move(basic_manager_options), &basic_manager));
 
   manager->reset(new AspiredVersionsManager(
       options.manage_state_interval_micros, options.env,
-      std::move(options.aspired_version_policy), std::move(basic_manager)));
+      std::move(options.aspired_version_policy),
+      std::move(options.custom_sort_actions), std::move(basic_manager),
+      options.with_current_context));
   (manager->get())->enable_reload_servables_with_error_ =
       options.enable_reload_servables_with_error;
   return OkStatus();
@@ -178,8 +195,10 @@ Status AspiredVersionsManager::Create(
 AspiredVersionsManager::AspiredVersionsManager(
     int64_t manage_state_interval_micros, Env* env,
     std::unique_ptr<AspiredVersionPolicy> aspired_version_policy,
-    std::unique_ptr<BasicManager> basic_manager)
+    CustomSortActionsFn custom_sort_actions,
+    std::unique_ptr<BasicManager> basic_manager, bool with_current_context)
     : aspired_version_policy_(std::move(aspired_version_policy)),
+      custom_sort_actions_(std::move(custom_sort_actions)),
       target_impl_(new internal::AspiredVersionsManagerTargetImpl(this)),
       basic_manager_(std::move(basic_manager)) {
   set_num_load_threads_observer_.reset(
@@ -190,13 +209,25 @@ AspiredVersionsManager::AspiredVersionsManager(
     PeriodicFunction::Options pf_options;
     pf_options.env = env;
     pf_options.thread_name_prefix = "AspiredVersionsManager_ManageState_Thread";
-    manage_state_thread_.reset(new PeriodicFunction(
-        [this]() {
-          this->FlushServables();
-          this->HandlePendingAspiredVersionsRequests();
-          this->InvokePolicyAndExecuteAction();
-        },
-        manage_state_interval_micros));
+    if (with_current_context) {
+      tensorflow::Context context(tensorflow::ContextKind::kThread);
+      manage_state_thread_.reset(new PeriodicFunction(
+          [this, context = std::move(context)]() {
+            tensorflow::WithContext wc(context);
+            this->FlushServables();
+            this->HandlePendingAspiredVersionsRequests();
+            this->InvokePolicyAndExecuteAction();
+          },
+          manage_state_interval_micros));
+    } else {
+      manage_state_thread_.reset(new PeriodicFunction(
+          [this]() {
+            this->FlushServables();
+            this->HandlePendingAspiredVersionsRequests();
+            this->InvokePolicyAndExecuteAction();
+          },
+          manage_state_interval_micros));
+    }
   }
 }
 
@@ -235,15 +266,15 @@ void AspiredVersionsManager::EnqueueAspiredVersionsRequest(
     std::vector<ServableData<std::unique_ptr<Loader>>> versions) {
   const Status validation_status =
       ValidateAspiredVersions(servable_name, versions);
-  DCHECK(validation_status.ok()) << validation_status.error_message();
+  DCHECK(validation_status.ok()) << validation_status.message();
   if (!validation_status.ok()) {
-    LOG(ERROR) << validation_status.error_message();
+    LOG(ERROR) << validation_status.message();
     return;
   }
 
   {
     mutex_lock l(pending_aspired_versions_requests_mu_);
-    VLOG(1) << "Enqueueing aspired versions request: " << servable_name << ": "
+    VLOG(2) << "Enqueueing aspired versions request: " << servable_name << ": "
             << ServableVersionsDebugString(versions);
     pending_aspired_versions_requests_[string(servable_name)] =
         std::move(versions);
@@ -253,7 +284,7 @@ void AspiredVersionsManager::EnqueueAspiredVersionsRequest(
 void AspiredVersionsManager::ProcessAspiredVersionsRequest(
     const StringPiece servable_name,
     std::vector<ServableData<std::unique_ptr<Loader>>> versions) {
-  VLOG(1) << "Processing aspired versions request: " << servable_name << ": "
+  VLOG(2) << "Processing aspired versions request: " << servable_name << ": "
           << ServableVersionsDebugString(versions);
 
   const std::set<int64_t> next_aspired_versions = GetVersionNumbers(versions);
@@ -308,11 +339,11 @@ void AspiredVersionsManager::ProcessAspiredVersionsRequest(
       id.name = std::string(servable_name);
       id.version = version_id.version;
       const Status manage_status = basic_manager_->StopManagingServable(id);
-      DCHECK(manage_status.ok()) << manage_status.error_message();
+      DCHECK(manage_status.ok()) << manage_status.message();
       if (!manage_status.ok()) {
         LOG(ERROR) << "Internal error: Unable to clear errored servable "
-                   << version_id.DebugString() << " from 'basic_manager_': "
-                   << manage_status.error_message();
+                   << version_id.DebugString()
+                   << " from 'basic_manager_': " << manage_status.message();
       }
       should_add = true;
     }
@@ -322,11 +353,11 @@ void AspiredVersionsManager::ProcessAspiredVersionsRequest(
       const Status manage_status =
           basic_manager_->ManageServableWithAdditionalState(
               std::move(version), std::unique_ptr<Aspired>(new Aspired{true}));
-      DCHECK(manage_status.ok()) << manage_status.error_message();
+      DCHECK(manage_status.ok()) << manage_status.message();
       if (!manage_status.ok()) {
         LOG(ERROR) << "Internal error: Unable to transfer servable "
                    << version_id.DebugString()
-                   << " to 'basic_manager_': " << manage_status.error_message();
+                   << " to 'basic_manager_': " << manage_status.message();
       }
     }
   }
@@ -368,7 +399,8 @@ AspiredVersionsManager::GetNextAction() {
         aspired_version_policy_->GetNextAction(aspired_state_snapshots));
   }
 
-  std::sort(actions.begin(), actions.end(), CompareActions());
+  std::sort(actions.begin(), actions.end(),
+            CompareActions(custom_sort_actions_));
   const absl::optional<AspiredVersionPolicy::ServableAction> next_action =
       !actions.empty() ? actions[0] : absl::nullopt;
   if (next_action) {

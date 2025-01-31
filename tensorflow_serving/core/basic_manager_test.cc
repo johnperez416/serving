@@ -16,15 +16,23 @@ limitations under the License.
 #include "tensorflow_serving/core/basic_manager.h"
 
 #include <algorithm>
+#include <atomic>
 #include <functional>
+#include <map>
+#include <memory>
+#include <set>
+#include <utility>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/status/status.h"
 #include "absl/types/optional.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/blocking_counter.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/null_file_system.h"
 #include "tensorflow/core/protobuf/error_codes.pb.h"
 #include "tensorflow_serving/core/servable_state_monitor.h"
@@ -595,7 +603,7 @@ TEST_P(BasicManagerTest, OutOfOrderLoadServable) {
   basic_manager_->LoadServable(id, [](const Status& status) {
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(error::NOT_FOUND, status.code());
-    EXPECT_THAT(status.error_message(), HasSubstr("is not being managed"));
+    EXPECT_THAT(status.message(), HasSubstr("is not being managed"));
   });
 }
 
@@ -609,7 +617,7 @@ TEST_P(BasicManagerTest, MultipleLoadServables) {
   basic_manager_->LoadServable(id, [](const Status& status) {
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(error::FAILED_PRECONDITION, status.code());
-    EXPECT_THAT(status.error_message(), HasSubstr("Duplicate load request"));
+    EXPECT_THAT(status.message(), HasSubstr("Duplicate load request"));
   });
 }
 
@@ -627,7 +635,7 @@ TEST_P(BasicManagerTest, MultipleUnloadServables) {
   basic_manager_->UnloadServable(id, [](const Status& status) {
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(error::FAILED_PRECONDITION, status.code());
-    EXPECT_THAT(status.error_message(),
+    EXPECT_THAT(status.message(),
                 HasSubstr("unload already requested/ongoing"));
   });
 }
@@ -637,7 +645,7 @@ TEST_P(BasicManagerTest, UnloadWithoutManage) {
   basic_manager_->UnloadServable(id, [](const Status& status) {
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(error::NOT_FOUND, status.code());
-    EXPECT_THAT(status.error_message(), HasSubstr("is not being managed"));
+    EXPECT_THAT(status.message(), HasSubstr("is not being managed"));
   });
 }
 
@@ -647,7 +655,7 @@ TEST_P(BasicManagerTest, UnloadWithoutLoad) {
   basic_manager_->UnloadServable(id, [](const Status& status) {
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(error::FAILED_PRECONDITION, status.code());
-    EXPECT_THAT(status.error_message(), HasSubstr("Servable not loaded"));
+    EXPECT_THAT(status.message(), HasSubstr("Servable not loaded"));
   });
 }
 
@@ -1051,8 +1059,7 @@ TEST_P(BasicManagerTest, ConcurrentLoadsOnlyOneSucceeds) {
     mutex_lock l(status_mu);
     if (!statuses[i].ok()) {
       EXPECT_EQ(error::FAILED_PRECONDITION, statuses[i].code());
-      EXPECT_THAT(statuses[i].error_message(),
-                  HasSubstr("Duplicate load request"));
+      EXPECT_THAT(statuses[i].message(), HasSubstr("Duplicate load request"));
     } else {
       ++num_status_ok;
     }
@@ -1097,10 +1104,9 @@ TEST_P(BasicManagerTest, ConcurrentUnloadsOnlyOneSucceeds) {
       ASSERT_THAT(statuses[i].code(),
                   AnyOf(error::NOT_FOUND, error::FAILED_PRECONDITION));
       if (statuses[i].code() == error::NOT_FOUND) {
-        EXPECT_THAT(statuses[i].error_message(),
-                    HasSubstr("not being managed"));
+        EXPECT_THAT(statuses[i].message(), HasSubstr("not being managed"));
       } else {
-        EXPECT_THAT(statuses[i].error_message(),
+        EXPECT_THAT(statuses[i].message(),
                     HasSubstr("unload already requested/ongoing"));
       }
     } else {
@@ -1685,10 +1691,49 @@ TEST(EstimateResourcesRetriedTest, Fails) {
       id, [](const Status& status) { EXPECT_FALSE(status.ok()); });
   WaitUntilServableManagerStateIsOneOf(servable_state_monitor, id,
                                        {ServableState::ManagerState::kEnd});
-  const ServableState available_state = {
-      id, ServableState::ManagerState::kEnd,
-      errors::Internal("Error on estimate resources.")};
   EXPECT_FALSE(servable_state_monitor.GetState(id)->health.ok());
+}
+
+TEST(EstimateResourcesRetriedTest, NonRetriableError) {
+  std::shared_ptr<EventBus<ServableState>> servable_event_bus =
+      EventBus<ServableState>::CreateEventBus();
+  ServableStateMonitor servable_state_monitor(servable_event_bus.get());
+
+  BasicManager::Options options;
+  // Seed the manager with ten resource units.
+  options.resource_tracker = CreateSimpleResourceTracker(10);
+  options.servable_event_bus = servable_event_bus.get();
+  options.num_load_threads = 0;
+  options.num_unload_threads = 0;
+  options.should_retry_model_load =
+      ([](absl::Status status) { return !absl::IsInvalidArgument(status); });
+
+  options.max_num_load_retries = 10;
+  options.load_retry_interval_micros = 100000000;
+
+  std::unique_ptr<BasicManager> basic_manager;
+  TF_CHECK_OK(BasicManager::Create(std::move(options), &basic_manager));
+
+  const ServableId id = {kServableName, 7};
+  test_util::MockLoader* loader = new NiceMock<test_util::MockLoader>;
+  EXPECT_CALL(*loader, LoadWithMetadata(_))
+      .WillOnce(Return(errors::InvalidArgument("Non-retriable error.")))
+      .WillRepeatedly(Return(absl::OkStatus()));
+  TF_ASSERT_OK(basic_manager->ManageServable(
+      CreateServableData(id, std::unique_ptr<Loader>(loader))));
+  basic_manager->LoadServable(
+      id, [](const auto& status) { EXPECT_FALSE(status.ok()); });
+
+  // Make sure the final state is kEnd.
+  WaitUntilServableManagerStateIsOneOf(
+      servable_state_monitor, id,
+      {ServableState::ManagerState::kEnd,
+       ServableState::ManagerState::kAvailable});
+  const auto final_state = servable_state_monitor.GetState(id);
+  ASSERT_TRUE(final_state.has_value());
+  EXPECT_EQ(final_state->manager_state, ServableState::ManagerState::kEnd);
+  EXPECT_FALSE(final_state->health.ok());
+  EXPECT_EQ(final_state->health.message(), "Non-retriable error.");
 }
 
 }  // namespace
