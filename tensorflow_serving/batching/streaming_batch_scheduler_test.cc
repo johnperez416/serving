@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow_serving/batching/streaming_batch_scheduler.h"
 
+#include <memory>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -48,9 +49,10 @@ class FakeTask : public BatchTask {
 
 // Creates a FakeTask of size 'task_size', and calls 'scheduler->Schedule()' on
 // that task. Returns the resulting status.
-Status ScheduleTask(size_t task_size, BatchScheduler<FakeTask>* scheduler) {
+absl::Status ScheduleTask(size_t task_size,
+                          BatchScheduler<FakeTask>* scheduler) {
   std::unique_ptr<FakeTask> task(new FakeTask(task_size));
-  Status status = scheduler->Schedule(&task);
+  absl::Status status = scheduler->Schedule(&task);
   // Schedule() should have consumed 'task' iff it returned Status::OK.
   CHECK_EQ(status.ok(), task == nullptr);
   return status;
@@ -295,7 +297,7 @@ TEST(StreamingBatchSchedulerTest, ConstMethods) {
 
     // Make another Schedule() call while the threads are full, which should
     // yield an UNAVAILABLE error.
-    Status status = ScheduleTask(1, scheduler.get());
+    absl::Status status = ScheduleTask(1, scheduler.get());
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(error::UNAVAILABLE, status.code());
     EXPECT_EQ(0, scheduler->NumEnqueuedTasks());

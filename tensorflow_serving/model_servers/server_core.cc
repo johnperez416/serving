@@ -15,6 +15,10 @@ limitations under the License.
 
 #include "tensorflow_serving/model_servers/server_core.h"
 
+#include <algorithm>
+#include <map>
+#include <memory>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -25,7 +29,9 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow_serving/config/file_system_storage_path_source.pb.h"
+#include "tensorflow_serving/core/aspired_versions_manager.h"
 #include "tensorflow_serving/core/load_servables_fast.h"
+#include "tensorflow_serving/core/servable_state_monitor.h"
 #include "tensorflow_serving/model_servers/model_platform_types.h"
 #include "tensorflow_serving/resources/resource_values.h"
 #include "tensorflow_serving/servables/tensorflow/saved_model_bundle_source_adapter.h"
@@ -46,9 +52,10 @@ Status GetPlatform(const ModelConfig& model_config, string* platform) {
     LOG(WARNING) << "Deprecated ModelServerConfig::model_type field used. "
                     "Prefer ModelServerConfig::model_platform.";
     if (!model_config.model_platform().empty()) {
-      return errors::InvalidArgument(
+      return errors::InvalidArgument(strings::StrCat(
           "Illegal setting both ModelServerConfig::model_type (deprecated) "
-          "and ModelServerConfig::model_platform.");
+          "and ModelServerConfig::model_platform, model name is ",
+          model_config.name()));
     }
     if (model_config.model_type() == ModelType::TENSORFLOW) {
       *platform = kTensorFlowModelPlatform;
@@ -62,11 +69,12 @@ Status GetPlatform(const ModelConfig& model_config, string* platform) {
   }
 
   if (platform->empty()) {
-    return errors::InvalidArgument(
+    return errors::InvalidArgument(strings::StrCat(
         "Illegal setting neither ModelServerConfig::model_type (deprecated) "
-        "nor ModelServerConfig::model_platform.");
+        "nor ModelServerConfig::model_platform, model name is ",
+        model_config.name()));
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Determines whether a URI is just a relative path.
@@ -113,7 +121,7 @@ Status ValidateModelConfigList(const ModelConfigList& config_list,
     }
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Returns an error if a model exists in both configs, but with different
@@ -141,7 +149,7 @@ Status ValidateNoModelsChangePlatforms(const ModelConfigList& old_config_list,
                           " and new platform requested is ", new_platform));
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Unions two route maps. Gives an error if there is a key that is present in
@@ -161,7 +169,7 @@ Status UnionRoutes(const DynamicSourceRouter<StoragePath>::Routes& a,
       }
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Finds all models that occur in 'new_config' but not in 'old_config'.
@@ -211,7 +219,7 @@ Status UpdateModelConfigListRelativePaths(
   for (int ii = 0; ii < updated_paths.size(); ++ii) {
     config_list->mutable_config(ii)->set_base_path(updated_paths[ii]);
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace
@@ -227,7 +235,7 @@ Status ServerCore::Create(Options options,
         [](EventBus<ServableState>* event_bus,
            std::unique_ptr<ServableStateMonitor>* monitor) {
           monitor->reset(new ServableStateMonitor(event_bus));
-          return OkStatus();
+          return absl::OkStatus();
         };
   }
 
@@ -240,10 +248,13 @@ Status ServerCore::Create(Options options,
   // server_core_config (which contains aspired_version_policy) below.
   std::unique_ptr<AspiredVersionPolicy> aspired_version_policy =
       std::move(options.aspired_version_policy);
+  AspiredVersionsManager::CustomSortActionsFn custom_sort_actions =
+      std::move(options.custom_sort_actions);
   auto model_server_config = options.model_server_config;
   server_core->reset(new ServerCore(std::move(options)));
-  TF_RETURN_IF_ERROR(
-      (*server_core)->Initialize(std::move(aspired_version_policy)));
+  TF_RETURN_IF_ERROR((*server_core)
+                         ->Initialize(std::move(aspired_version_policy),
+                                      std::move(custom_sort_actions)));
   return (*server_core)->ReloadConfig(model_server_config);
 }
 
@@ -263,7 +274,9 @@ ServerCore::ServerCore(Options options)
   }
 }
 
-Status ServerCore::Initialize(std::unique_ptr<AspiredVersionPolicy> policy) {
+Status ServerCore::Initialize(
+    std::unique_ptr<AspiredVersionPolicy> policy,
+    AspiredVersionsManager::CustomSortActionsFn custom_sort_actions) {
   std::unique_ptr<ServableStateMonitor> servable_state_monitor;
   const tensorflow::Status status = options_.servable_state_monitor_creator(
       servable_event_bus_.get(), &servable_state_monitor);
@@ -275,11 +288,12 @@ Status ServerCore::Initialize(std::unique_ptr<AspiredVersionPolicy> policy) {
   servable_state_monitor_ = std::move(servable_state_monitor);
 
   std::unique_ptr<AspiredVersionsManager> aspired_versions_manager;
-  TF_RETURN_IF_ERROR(CreateAspiredVersionsManager(std::move(policy),
-                                                  &aspired_versions_manager));
+  TF_RETURN_IF_ERROR(CreateAspiredVersionsManager(
+      std::move(policy), std::move(custom_sort_actions),
+      &aspired_versions_manager));
   manager_.SetOwned(std::move(aspired_versions_manager));
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::WaitUntilModelsAvailable(const std::set<string>& models,
@@ -290,9 +304,10 @@ Status ServerCore::WaitUntilModelsAvailable(const std::set<string>& models,
     awaited_servables.push_back(ServableRequest::Latest(model));
   }
   std::map<ServableId, ServableState::ManagerState> states_reached;
-  const bool all_models_available = monitor->WaitUntilServablesReachState(
-      awaited_servables, ServableState::ManagerState::kAvailable,
-      &states_reached);
+  const bool all_models_available =
+      monitor->WaitUntilServablesReachStateWithTimeout(
+          awaited_servables, ServableState::ManagerState::kAvailable,
+          options_.servable_state_waiter_timeout, &states_reached);
   if (!all_models_available) {
     const int num_unavailable_models = std::count_if(
         states_reached.begin(), states_reached.end(),
@@ -317,7 +332,7 @@ Status ServerCore::WaitUntilModelsAvailable(const std::set<string>& models,
     strings::StrAppend(&message, "}");
     return errors::Unknown(message);
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::AddModelsViaModelConfigList() {
@@ -361,6 +376,7 @@ Status ServerCore::AddModelsViaModelConfigList() {
   } else {
     // Create a fresh servable state monitor, to avoid getting confused if we're
     // re-loading a model-version that has previously been unloaded.
+
     ServableStateMonitor fresh_servable_state_monitor(
         servable_event_bus_.get());
 
@@ -394,7 +410,7 @@ Status ServerCore::AddModelsViaModelConfigList() {
     TF_RETURN_IF_ERROR(
         WaitUntilModelsAvailable(new_models, &fresh_servable_state_monitor));
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::AddModelsViaCustomModelConfig() {
@@ -425,7 +441,7 @@ Status ServerCore::MaybeUpdateServerRequestLogger(
     return options_.server_request_logger->Update(logging_config_map);
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::ReloadConfig(const ModelServerConfig& new_config) {
@@ -447,7 +463,7 @@ Status ServerCore::ReloadConfig(const ModelServerConfig& new_config) {
     // Nothing to load. In this case we allow a future call with a non-empty
     // config.
     LOG(INFO) << "Taking no action for empty config.";
-    return OkStatus();
+    return absl::OkStatus();
   }
   if (new_config.config_case() == ModelServerConfig::kModelConfigList) {
     TF_RETURN_IF_ERROR(
@@ -492,7 +508,7 @@ Status ServerCore::ReloadConfig(const ModelServerConfig& new_config) {
   }
 
   LOG(INFO) << "Finished reloading config";
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::UpdateModelVersionLabelMap() {
@@ -541,7 +557,7 @@ Status ServerCore::UpdateModelVersionLabelMap() {
       return errors::FailedPrecondition(
           "Model version labels are not currently allowed by the server.");
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   if (VLOG_IS_ON(4)) {
@@ -559,7 +575,7 @@ Status ServerCore::UpdateModelVersionLabelMap() {
   mutex_lock l(model_labels_to_versions_mu_);
   model_labels_to_versions_.swap(new_label_map);
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::CreateAdapter(
@@ -616,7 +632,7 @@ Status ServerCore::CreateStoragePathRoutes(
     const int port = it->second;
     (*routes)[model_name] = port;
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::CreateStoragePathSource(
@@ -638,7 +654,7 @@ Status ServerCore::CreateStoragePathSource(
     ConnectSourceToTarget(source->get(), prefix_source_adapter->get());
     ConnectSourceToTarget(prefix_source_adapter->get(), target);
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::CreateRouter(
@@ -670,7 +686,7 @@ Status ServerCore::CreateRouter(
   ConnectSourceToTarget(output_ports[output_ports.size() - 1],
                         targets->error_adapter.get());
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::CreateAdapters(SourceAdapters* adapters) const {
@@ -683,7 +699,7 @@ Status ServerCore::CreateAdapters(SourceAdapters* adapters) const {
   adapters->error_adapter.reset(
       new ErrorInjectingSourceAdapter<StoragePath, std::unique_ptr<Loader>>(
           errors::Internal("No platform found for model")));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::ConnectAdaptersToManagerAndAwaitModelLoads(
@@ -707,7 +723,7 @@ Status ServerCore::ConnectAdaptersToManagerAndAwaitModelLoads(
     return status;
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::ReloadStoragePathSourceConfig(
@@ -732,6 +748,7 @@ Status ServerCore::ReloadRoutes(
 
 Status ServerCore::CreateAspiredVersionsManager(
     std::unique_ptr<AspiredVersionPolicy> aspired_version_policy,
+    AspiredVersionsManager::CustomSortActionsFn custom_sort_actions,
     std::unique_ptr<AspiredVersionsManager>* const manager) {
   std::unique_ptr<AspiredVersionsManager> aspired_versions_manager;
   AspiredVersionsManager::Options manager_options;
@@ -740,6 +757,7 @@ Status ServerCore::CreateAspiredVersionsManager(
   manager_options.resource_tracker = std::move(resource_tracker);
   manager_options.servable_event_bus = servable_event_bus_.get();
   manager_options.aspired_version_policy = std::move(aspired_version_policy);
+  manager_options.custom_sort_actions = std::move(custom_sort_actions);
   manager_options.num_load_threads = options_.num_load_threads;
   manager_options.num_unload_threads = options_.num_unload_threads;
   manager_options.max_num_load_retries = options_.max_num_load_retries;
@@ -749,6 +767,10 @@ Status ServerCore::CreateAspiredVersionsManager(
   manager_options.flush_filesystem_caches = options_.flush_filesystem_caches;
   manager_options.enable_reload_servables_with_error =
       options_.enable_reload_servables_with_error;
+  manager_options.with_current_context = options_.with_current_context;
+  if (options_.should_retry_model_load) {
+    manager_options.should_retry_model_load = options_.should_retry_model_load;
+  }
   const tensorflow::Status status =
       AspiredVersionsManager::Create(std::move(manager_options), manager);
   if (!status.ok()) {
@@ -809,7 +831,7 @@ Status ServerCore::ServableRequestFromModelSpec(
       break;
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ServerCore::GetModelVersionForLabel(const string& model_name,
@@ -826,7 +848,7 @@ Status ServerCore::GetModelVersionForLabel(const string& model_name,
     auto version_it = version_map.find(label);
     if (version_it != version_map.end()) {
       *version = version_it->second;
-      return OkStatus();
+      return absl::OkStatus();
     }
   }
   return errors::InvalidArgument(

@@ -27,21 +27,22 @@ limitations under the License.
 namespace tensorflow {
 namespace serving {
 
-Status TensorflowClassificationServiceImpl::Classify(
+absl::Status TensorflowClassificationServiceImpl::Classify(
     const RunOptions& run_options, ServerCore* core,
     const thread::ThreadPoolOptions& thread_pool_options,
     const ClassificationRequest& request, ClassificationResponse* response) {
   // Verify Request Metadata and create a ServableRequest
   if (!request.has_model_spec()) {
-    return tensorflow::Status(tensorflow::error::INVALID_ARGUMENT,
-                              "Missing ModelSpec");
+    return absl::Status(
+        static_cast<absl::StatusCode>(absl::StatusCode::kInvalidArgument),
+        "Missing ModelSpec");
   }
 
   return ClassifyWithModelSpec(run_options, core, thread_pool_options,
                                request.model_spec(), request, response);
 }
 
-Status TensorflowClassificationServiceImpl::ClassifyWithModelSpec(
+absl::Status TensorflowClassificationServiceImpl::ClassifyWithModelSpec(
     const RunOptions& run_options, ServerCore* core,
     const thread::ThreadPoolOptions& thread_pool_options,
     const ModelSpec& model_spec, const ClassificationRequest& request,

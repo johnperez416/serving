@@ -15,8 +15,15 @@ limitations under the License.
 
 #include "tensorflow_serving/servables/tensorflow/saved_model_warmup_util.h"
 
+#include <algorithm>
+#include <functional>
+#include <memory>
+#include <utility>
+
 #include "google/protobuf/wrappers.pb.h"
 #include "tensorflow/cc/saved_model/constants.h"
+#include "xla/tsl/platform/errors.h"
+#include "tensorflow/core/kernels/batching_util/warmup.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/lib/io/record_reader.h"
@@ -51,9 +58,22 @@ uint64_t GetLatencyMicroseconds(const uint64_t start_microseconds) {
 constexpr char WarmupConsts::kRequestsFileName[];
 constexpr int WarmupConsts::kMaxNumRecords;
 
-Status RunSavedModelWarmup(
+absl::Status RunSavedModelWarmup(
     const ModelWarmupOptions& model_warmup_options, const string export_dir,
-    std::function<Status(PredictionLog)> warmup_request_executor) {
+    std::function<absl::Status(PredictionLog)> warmup_request_executor) {
+  WarmupStateRegistry::Handle warmup_handle;
+  auto per_model_data = std::make_unique<WarmupStateRegistry::PerModelData>();
+  per_model_data->warmup_all_batch_sizes =
+      model_warmup_options.enable_all_batch_sizes_warmup();
+  if (!model_warmup_options.model_name().empty()) {
+    auto h = GetGlobalWarmupStateRegistry().Register(
+        {model_warmup_options.model_name(),
+         model_warmup_options.model_version()},
+        std::move(per_model_data));
+    TF_RETURN_IF_ERROR(h.status());
+    warmup_handle = std::move(h.value());
+  }
+
   const uint64_t start_microseconds = EnvTime::NowMicros();
   const string warmup_path =
       io::JoinPath(export_dir, kSavedModelAssetsExtraDirectory,
@@ -61,7 +81,7 @@ Status RunSavedModelWarmup(
   if (!tensorflow::Env::Default()->FilesExist({warmup_path}, nullptr)) {
     LOG(INFO) << "No warmup data file found at " << warmup_path;
     // Having warmup data is optional, return OK
-    return OkStatus();
+    return absl::OkStatus();
   }
   const int num_request_iterations = [&]() {
     if (model_warmup_options.has_num_request_iterations()) {
@@ -82,7 +102,7 @@ Status RunSavedModelWarmup(
           ? std::max(model_warmup_options.num_model_warmup_threads().value(), 1)
           : 1;
   std::unique_ptr<tensorflow::io::SequentialRecordReader> tf_record_file_reader;
-  Status status;
+  absl::Status status;
   int num_warmup_records = 0;
   if (num_model_warmup_threads <= 1) {
     tf_record_file_reader.reset(
@@ -112,7 +132,7 @@ Status RunSavedModelWarmup(
       ::tensorflow::mutex mu;
       int num_thread_task_done ABSL_GUARDED_BY(mu){0};
       int num_warmup_records ABSL_GUARDED_BY(mu){0};
-      ::tensorflow::Status warm_up_status ABSL_GUARDED_BY(mu);
+      absl::Status warm_up_status ABSL_GUARDED_BY(mu);
       // Condition variable to wait until all scheduled warmup tasks are
       // executed.
       ::tensorflow::condition_variable done ABSL_GUARDED_BY(mu);
@@ -133,20 +153,20 @@ Status RunSavedModelWarmup(
       executor->Schedule([state, num_request_iterations,
                           warmup_request_executor, warmup_path,
                           num_model_warmup_threads]() {
-        Status status = OkStatus();
+        absl::Status status = absl::OkStatus();
         while (status.ok()) {
           tstring record;
-          Status execution_status;
+          absl::Status execution_status;
           tensorflow::serving::PredictionLog prediction_log;
           {
             ::tensorflow::mutex_lock lock(state->mu);
+            if (!state->warm_up_status.ok()) {
+              break;
+            }
             if (state->num_warmup_records > WarmupConsts::kMaxNumRecords) {
               state->warm_up_status = errors::InvalidArgument(
                   "Number of warmup records exceeds the maximum (",
                   WarmupConsts::kMaxNumRecords, ") at ", warmup_path);
-              break;
-            }
-            if (!state->warm_up_status.ok()) {
               break;
             }
             execution_status =
@@ -165,11 +185,15 @@ Status RunSavedModelWarmup(
           for (int i = 0; i < num_request_iterations; ++i) {
             execution_status = warmup_request_executor(prediction_log);
             if (!execution_status.ok()) {
-              ::tensorflow::mutex_lock lock(state->mu);
-              state->warm_up_status = execution_status;
               break;
             }
           }
+          if (!execution_status.ok()) {
+            ::tensorflow::mutex_lock lock(state->mu);
+            state->warm_up_status = execution_status;
+            break;
+          }
+
           ::tensorflow::mutex_lock lock(state->mu);
           ++state->num_warmup_records;
           status = state->warm_up_status;
@@ -192,7 +216,7 @@ Status RunSavedModelWarmup(
   // the 'model_warm_up_latency' metric below records OK upon successful
   // warm-up.
   if (errors::IsOutOfRange(status)) {
-    status = OkStatus();
+    status = absl::OkStatus();
   }
 
   const auto warmup_latency = GetLatencyMicroseconds(start_microseconds);
@@ -201,7 +225,7 @@ Status RunSavedModelWarmup(
 
   if (errors::IsDataLoss(status)) {
     return errors::DataLoss(
-        status.error_message(),
+        status.message(),
         ". Please verify your warmup data is in TFRecord format.");
   }
 
@@ -210,7 +234,7 @@ Status RunSavedModelWarmup(
   LOG(INFO) << "Finished reading warmup data for model at " << warmup_path
             << ". Number of warmup records read: " << num_warmup_records
             << ". Elapsed time (microseconds): " << warmup_latency << ".";
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace internal

@@ -22,10 +22,15 @@ limitations under the License.
 namespace tensorflow {
 namespace serving {
 
-Status EstimateMainRamBytesFromPath(const string& path,
-                                    bool use_validation_result,
-                                    FileProbingEnv* env,
-                                    ResourceAllocation* estimate) {
+absl::Status EstimateMainRamBytesFromValidationResult(
+    const string& path, ResourceAllocation* estimate) {
+  return errors::Unimplemented("Reading validation results is not supported");
+}
+
+absl::Status EstimateMainRamBytesFromPath(const string& path,
+                                          bool use_validation_result,
+                                          FileProbingEnv* env,
+                                          ResourceAllocation* estimate) {
   return EstimateResourceFromPathUsingDiskState(path, env, estimate);
 }
 

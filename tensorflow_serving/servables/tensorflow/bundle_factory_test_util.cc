@@ -15,7 +15,11 @@ limitations under the License.
 
 #include "tensorflow_serving/servables/tensorflow/bundle_factory_test_util.h"
 
+#include <memory>
 #include <queue>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "tensorflow/cc/saved_model/constants.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -174,8 +178,8 @@ void CopyDirOrDie(const string& src_dir, const string& dst_dir) {
     TF_ASSERT_OK(Env::Default()->GetChildren(dir, &children));
     for (const string& child : children) {
       const string child_path = io::JoinPath(dir, child);
-      StringPiece remainder = child_path;
-      CHECK(str_util::ConsumePrefix(&remainder, src_dir));
+      absl::string_view remainder = child_path;
+      CHECK(absl::ConsumePrefix(&remainder, src_dir));
       if (Env::Default()->IsDirectory(child_path).ok()) {
         TF_ASSERT_OK(
             Env::Default()->CreateDir(io::JoinPath(dst_dir, remainder)));

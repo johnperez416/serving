@@ -1,7 +1,11 @@
 # Description:
 # Remote Predict Op Prototype
+
+# buildifier: disable=same-origin-load
+# Placeholder: load py_test
 load("@org_tensorflow//tensorflow:tensorflow.bzl", "tf_custom_op_library", "tf_gen_op_libs", "tf_gen_op_wrapper_cc", "tf_gen_op_wrapper_py", "tf_kernel_library")
 load("@org_tensorflow//tensorflow:tensorflow.bzl", "tf_custom_op_py_library")
+# buildifier: enable=same-origin-load
 
 licenses(["notice"])
 
@@ -48,10 +52,6 @@ cc_library(
     name = "remote_predict_ops_cc",
     srcs = ["cc/ops/remote_predict_op.cc"],
     hdrs = ["cc/ops/remote_predict_op.h"],
-    visibility = [
-        "//tensorflow_serving/experimental/example:__subpackages__",
-        "//tensorflow_serving/model_servers:__subpackages__",
-    ],
     deps = [
         ":remote_predict_op_op_lib",
         "@org_tensorflow//tensorflow/cc:const_op",
@@ -77,10 +77,6 @@ tf_kernel_library(
     hdrs = [
         "kernels/prediction_service_grpc.h",
         "kernels/remote_predict_op_kernel.h",
-    ],
-    visibility = [
-        "//tensorflow_serving/experimental/example:__subpackages__",
-        "//tensorflow_serving/model_servers:__subpackages__",
     ],
     deps = [
         ":remote_predict_op_op_lib",
@@ -118,10 +114,13 @@ tf_custom_op_py_library(
         ":remote_predict_op_op_lib",
     ],
     srcs_version = "PY2AND3",
+    tags = [
+        "manual",
+    ],
     visibility = ["//tensorflow_serving/experimental/example:__subpackages__"],
     deps = [
         ":gen_remote_predict_op",
-        "@org_tensorflow//tensorflow/python:framework_for_generated_wrappers",
+        "@org_tensorflow//tensorflow/python/framework:for_generated_wrappers",
     ],
 )
 
@@ -192,7 +191,5 @@ filegroup(
             "**/OWNERS",
         ],
     ),
-    visibility = [
-        "//tensorflow_serving:__subpackages__",
-    ],
+    visibility = ["//visibility:private"],
 )

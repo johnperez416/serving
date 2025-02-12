@@ -274,6 +274,7 @@ cc_library(
     srcs = ["retrier.cc"],
     hdrs = ["retrier.h"],
     deps = [
+        "@com_google_absl//absl/status",
         "@org_tensorflow//tensorflow/core:lib",
     ],
 )
@@ -284,7 +285,9 @@ cc_test(
     deps = [
         ":retrier",
         "//tensorflow_serving/core/test_util:test_main",
+        "@com_google_absl//absl/status",
         "@org_tensorflow//tensorflow/core:lib",
+        "@org_tensorflow//tensorflow/core:test",
     ],
 )
 
@@ -337,6 +340,7 @@ cc_test(
         "//tensorflow_serving/apis:regression_cc_proto",
         "//tensorflow_serving/core/test_util:test_main",
         "//tensorflow_serving/test_util",
+        "@com_google_absl//absl/strings",
         "@com_google_protobuf//:protobuf",
         "@org_tensorflow//tensorflow/core:framework",
         "@org_tensorflow//tensorflow/core:lib",
@@ -367,7 +371,6 @@ serving_proto_library(
     name = "class_registration_test_proto",
     testonly = 1,
     srcs = ["class_registration_test.proto"],
-    cc_api_version = 2,
     deps = [
         "@com_google_protobuf//:cc_wkt_protos",
     ],
