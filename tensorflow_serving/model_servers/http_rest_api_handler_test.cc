@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow_serving/model_servers/http_rest_api_handler.h"
 
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -30,6 +31,7 @@ limitations under the License.
 #include "re2/re2.h"
 #include "tensorflow/cc/saved_model/loader.h"
 #include "tensorflow/cc/saved_model/signature_constants.h"
+#include "xla/tsl/platform/errors.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/env.h"
@@ -95,9 +97,10 @@ class HttpRestApiHandlerTest : public ::testing::Test {
     ServerCore::Options options;
     options.model_server_config = config;
 
-    TF_RETURN_IF_ERROR(
-        tensorflow::serving::init::SetupPlatformConfigMapForTensorFlow(
-            SessionBundleConfig(), options.platform_config_map));
+    auto* tf_serving_registry =
+        init::TensorflowServingFunctionRegistration::GetRegistry();
+    TF_RETURN_IF_ERROR(tf_serving_registry->GetSetupPlatformConfigMap()(
+        SessionBundleConfig(), options.platform_config_map));
     // Reduce the number of initial load threads to be num_load_threads to avoid
     // timing out in tests.
     options.num_initial_load_threads = options.num_load_threads;
@@ -163,7 +166,7 @@ Status CompareJson(const string& json1, const string& json2) {
     return errors::InvalidArgument("JSON Different. JSON1: ", json1,
                                    "JSON2: ", json2);
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 TEST_F(HttpRestApiHandlerTest, kPathRegex) {
@@ -179,47 +182,47 @@ TEST_F(HttpRestApiHandlerTest, UnsupportedApiCalls) {
   status = handler_.ProcessRequest("GET", "/v1/foo", "", &headers, &model_name,
                                    &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest("POST", "/v1/foo", "", &headers, &model_name,
                                    &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest("GET", "/v1/models", "", &headers,
                                    &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Missing model name"));
+  EXPECT_THAT(status.message(), HasSubstr("Missing model name"));
   status = handler_.ProcessRequest("GET", "/v1/models/debug/model_name", "",
                                    &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest("POST", "/v1/models", "", &headers,
                                    &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest("GET", "/v1/models/foo:predict", "",
                                    &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest("GET", "/v1/models/foo/version/50:predict",
                                    "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest("POST", "/v1/models/foo/version/50:regress",
                                    "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status =
       handler_.ProcessRequest("POST", "/v1/models/foo/versions/HELLO:regress",
                               "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest(
       "POST",
@@ -227,30 +230,30 @@ TEST_F(HttpRestApiHandlerTest, UnsupportedApiCalls) {
                    std::numeric_limits<uint64_t>::max(), ":regress"),
       "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Failed to convert version"));
+  EXPECT_THAT(status.message(), HasSubstr("Failed to convert version"));
 
   status = handler_.ProcessRequest("POST", "/v1/models/foo/metadata", "",
                                    &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status =
       handler_.ProcessRequest("POST", "/v1/models/foo/label/some_label:regress",
                               "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest(
       "POST", "/v1/models/foo/versions/50/labels/some_label:regress", "",
       &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest("POST",
                                    "/v1/models/foo/versions/some_label:regress",
                                    "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+  EXPECT_THAT(status.message(), HasSubstr("Malformed request"));
 }
 
 TEST_F(HttpRestApiHandlerTest, PredictModelNameVersionErrors) {
@@ -287,22 +290,21 @@ TEST_F(HttpRestApiHandlerTest, PredictRequestErrors) {
   status = handler_.ProcessRequest("POST", req_path, "", &headers, &model_name,
                                    &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(),
+  EXPECT_THAT(status.message(),
               HasSubstr("JSON Parse error: The document is empty"));
 
   // Badly formatted JSON.
   status = handler_.ProcessRequest("POST", req_path, "instances = [1, 2]",
                                    &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(),
-              HasSubstr("JSON Parse error: Invalid value"));
+  EXPECT_THAT(status.message(), HasSubstr("JSON Parse error: Invalid value"));
 
   // Incorrect type.
   status = handler_.ProcessRequest("POST", req_path,
                                    R"({ "instances": ["x", "y"] })", &headers,
                                    &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(), HasSubstr("not of expected type: float"));
+  EXPECT_THAT(status.message(), HasSubstr("not of expected type: float"));
 
   // Nonexistent version label.
   status = handler_.ProcessRequest(
@@ -312,7 +314,7 @@ TEST_F(HttpRestApiHandlerTest, PredictRequestErrors) {
       R"({ "instances": ["x", "y"] })", &headers, &model_name, &method,
       &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
-  EXPECT_THAT(status.error_message(),
+  EXPECT_THAT(status.message(),
               HasSubstr("Unrecognized servable version label"));
 
   // Incorrect signature_name type.

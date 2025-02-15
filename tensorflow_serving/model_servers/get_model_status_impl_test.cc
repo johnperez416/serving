@@ -15,6 +15,10 @@ limitations under the License.
 
 #include "tensorflow_serving/model_servers/get_model_status_impl.h"
 
+#include <memory>
+#include <set>
+#include <utility>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "tensorflow/cc/saved_model/loader.h"
@@ -92,7 +96,7 @@ TEST_F(GetModelStatusImplTest, MissingOrEmptyModelSpecFailure) {
 
   // Empty request is invalid.
   EXPECT_EQ(
-      tensorflow::error::INVALID_ARGUMENT,
+      static_cast<absl::StatusCode>(absl::StatusCode::kInvalidArgument),
       GetModelStatusImpl::GetModelStatus(GetServerCore(), request, &response)
           .code());
 }

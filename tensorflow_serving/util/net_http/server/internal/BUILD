@@ -1,10 +1,8 @@
 # Description: implementations of HTTP Server
 
-package(
-    default_visibility = [
-        "//tensorflow_serving/util/net_http:__subpackages__",
-    ],
-)
+package(default_visibility = [
+    "//tensorflow_serving/util/net_http:__subpackages__",
+])
 
 licenses(["notice"])
 
@@ -22,6 +20,7 @@ cc_library(
     deps = [
         "//tensorflow_serving/util/net_http/compression:gzip_zlib",
         "//tensorflow_serving/util/net_http/internal:net_logging",
+        "//tensorflow_serving/util/net_http/public:shared_files",
         "//tensorflow_serving/util/net_http/server/public:http_server_api",
         "@com_github_libevent_libevent//:libevent",
         "@com_google_absl//absl/base",

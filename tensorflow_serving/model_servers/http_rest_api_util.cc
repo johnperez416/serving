@@ -15,6 +15,9 @@ limitations under the License.
 
 #include "tensorflow_serving/model_servers/http_rest_api_util.h"
 
+#include <utility>
+#include <vector>
+
 #include "google/protobuf/util/json_util.h"
 #include "absl/strings/numbers.h"
 #include <curl/curl.h>
@@ -60,7 +63,7 @@ Status FillModelSpecWithNameVersionAndLabel(
   if (model_version_label.has_value()) {
     model_spec->set_version_label(string(model_version_label.value()));
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 bool DecodeArg(string* arg) {
@@ -123,7 +126,7 @@ Status ParseModelInfo(const absl::string_view http_method,
     }
     *model_version_label = model_version_label_str;
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ToJsonString(const GetModelStatusResponse& response, string* output) {
@@ -136,7 +139,7 @@ Status ToJsonString(const GetModelStatusResponse& response, string* output) {
     return errors::Internal("Failed to convert proto to json. Error: ",
                             status.ToString());
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 Status ToJsonString(const GetModelMetadataResponse& response, string* output) {
@@ -191,7 +194,7 @@ Status ToJsonString(const GetModelMetadataResponse& response, string* output) {
   absl::StrAppend(output, "\"signature_def\": ", signature_def_output, "}\n");
   absl::StrAppend(output, "}\n");
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace serving

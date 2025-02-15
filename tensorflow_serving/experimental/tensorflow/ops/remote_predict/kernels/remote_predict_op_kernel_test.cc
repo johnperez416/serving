@@ -14,6 +14,11 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow_serving/experimental/tensorflow/ops/remote_predict/kernels/remote_predict_op_kernel.h"
 
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "tensorflow/cc/client/client_session.h"
@@ -40,7 +45,7 @@ class MockPredictionService {
     return ::absl::OkStatus();
   }
 
-  StatusOr<MockRpc*> CreateRpc(absl::Duration max_rpc_deadline) {
+  absl::StatusOr<MockRpc*> CreateRpc(absl::Duration max_rpc_deadline) {
     return new MockRpc;
   }
 
@@ -87,7 +92,7 @@ REGISTER_KERNEL_BUILDER(Name("TfServingRemotePredict").Device(DEVICE_CPU),
 using RemotePredict = ops::TfServingRemotePredict;
 
 // Use model_name to specify the behavior of different tests.
-::tensorflow::Status RunRemotePredict(
+absl::Status RunRemotePredict(
     const string& model_name, std::vector<Tensor>* outputs,
     const DataTypeSlice& output_types = {DT_INT32, DT_INT32},
     const absl::optional<::absl::Duration> deadline = absl::nullopt,
@@ -150,7 +155,7 @@ TEST(RemotePredictTest, TestRpcError) {
       /*model_name=*/MockPredictionService::kBadModel, &outputs);
   ASSERT_FALSE(status.ok());
   EXPECT_EQ(error::Code::ABORTED, status.code());
-  EXPECT_THAT(status.error_message(), ::testing::HasSubstr("Aborted"));
+  EXPECT_THAT(status.message(), ::testing::HasSubstr("Aborted"));
 }
 
 TEST(RemotePredictTest, TestRpcErrorReturnStatus) {
